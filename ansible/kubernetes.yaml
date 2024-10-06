@@ -1,0 +1,122 @@
+---
+- name: configuring master and worker nodes
+  hosts: all
+  become: true
+  become_method: sudo
+  vars:
+    username_var: ahmed
+  tasks:
+    - name: Installing required packages for k8s
+      ansible.builtin.apt:
+        name:
+          - docker.io
+          - apt-transport-https
+          - ca-certificates
+          - curl
+          - gnupg
+        state: present
+        update_cache: true
+      notify: Handle Docker Socket Permissions
+
+    - name: Ensure /etc/apt/keyrings directory exists
+      ansible.builtin.file:
+        path: /etc/apt/keyrings
+        state: directory
+        mode: 0755
+
+
+    - name: Install GPG key for Kubernetes
+      ansible.builtin.shell: >
+        curl -fsSL https://pkgs.k8s.io/core:/stable:/v1.28/deb/Release.key | gpg --dearmor -o /etc/apt/keyrings/kubernetes-apt-keyring.gpg
+      args:
+        creates: /etc/apt/keyrings/kubernetes-apt-keyring.gpg  # Prevents re-running if the file exists
+
+
+    - name: Add Kubernetes APT repository
+      ansible.builtin.apt_repository:
+        repo: 'deb [signed-by=/etc/apt/keyrings/kubernetes-apt-keyring.gpg] https://pkgs.k8s.io/core:/stable:/v1.28/deb/ /'
+        state: present
+
+    - name: Installing k8s components packages
+      ansible.builtin.apt:
+        name:
+          - kubeadm=1.28.1-1.1
+          - kubelet=1.28.1-1.1
+          - kubectl=1.28.1-1.1
+        state: present
+        update_cache: true
+
+    - name: Disable Swap
+      ansible.builtin.command: swapoff -a
+
+    - name: Reset kubeadm
+      ansible.builtin.command: kubeadm reset --force
+
+    - name: Starting services
+      ansible.builtin.service:
+        name: "{{ item }}"
+        state: started
+        enabled: true
+      loop:
+          - docker
+          - kubelet
+
+
+    - name: Initialize K8s Cluster
+      tags: Initialize_cluster
+      ansible.builtin.command: kubeadm init --pod-network-cidr=10.244.0.0/16
+      register: kubeadm_output
+      when: "'kubernetes_master_nodes' in group_names"
+
+    - name: Making Kube config directory
+      tags: config_directory
+      ansible.builtin.file:
+        path: "/home/{{ username_var }}/.kube"
+        owner: "{{ username_var }}"
+        group: "{{ username_var }}"
+        state: directory
+        when: "'kubernetes_master_nodes' in group_names"
+
+    - name: Kube config copy
+      tags: copy_config
+      ansible.builtin.shell: sudo cp /etc/kubernetes/admin.conf /home/{{ username_var }}/.kube/config && chown {{ username_var }}:{{ username_var }} /home/{{ username_var }}/.kube/config
+      when: "'kubernetes_master_nodes' in group_names"
+
+
+    - name: Install Calico CNI
+      ansible.builtin.shell: >
+        kubectl apply -f https://docs.projectcalico.org/v3.20/manifests/calico.yaml
+      when: "'kubernetes_master_nodes' in group_names"
+
+    - name: Deploy Ingress Controller (NGINX)
+      ansible.builtin.shell: >
+        kubectl apply -f https://raw.githubusercontent.com/kubernetes/ingress-nginx/controller-v0.49.0/deploy/static/provider/baremetal/deploy.yaml
+      when: "'kubernetes_master_nodes' in group_names"
+
+    - name: Install Kubeaudit
+      unarchive:
+       src: https://github.com/Shopify/kubeaudit/releases/download/v0.22.2/kubeaudit_0.22.2_linux_amd64.tar.gz
+       dest: /usr/local/bin/
+       remote_src: yes
+
+    - name: Get the kubeadm join command from master
+      command: kubeadm token create --print-join-command
+      register: join_command
+      changed_when: false
+      delegate_to: "{{ groups['kubernetes_master_nodes'][0] }}"
+      run_once: true
+
+    - name: Set fact for the join command
+      set_fact:
+        worker_join_command: "{{ join_command.stdout }}"
+      when: join_command is defined
+
+    - name: Join the Kubernetes cluster
+      command: "{{ worker_join_command }}"
+      when: "'kubernetes_worker_nodes' in group_names"
+
+  handlers:
+    - name: Handle Docker Socket Permissions
+      ansible.builtin.file:
+        path: /var/run/docker.sock
+        mode: 0666
