@@ -1,0 +1,20 @@
+---
+- name: Reset kubeadm
+  ansible.builtin.command: kubeadm reset --force
+
+- name: Initialize K8s Cluster
+  tags: Initialize_cluster
+  ansible.builtin.command: kubeadm init --pod-network-cidr=10.244.0.0/16
+  register: kubeadm_output
+
+- name: Making Kube config directory
+  tags: config_directory
+  ansible.builtin.file:
+    path: "/home/{{ username_var }}/.kube"
+    owner: "{{ username_var }}"
+    group: "{{ groupname_var }}"
+    state: directory
+
+- name: Kube config copy
+  tags: copy_config
+  ansible.builtin.shell: sudo cp /etc/kubernetes/admin.conf /home/{{ username_var }}/.kube/config && chown {{ username_var }}:{{ groupname_var }} /home/{{ username_var }}/.kube/config

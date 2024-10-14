@@ -1,0 +1,176 @@
+---
+- name: Configuring master and worker nodes
+  hosts: all
+  become: true
+  vars:
+    username_var: ahmed
+    groupname_var: ahmed
+    master_nodes_group: kubernetes_master_nodes
+    worker_nodes_group: kubernetes_worker_nodes
+  tasks:
+    - name: Installing required packages for k8s
+      ansible.builtin.apt:
+        name:
+          - containerd
+          - docker.io
+          - apt-transport-https
+          - ca-certificates
+          - curl
+          - gnupg
+        state: present
+        update_cache: true
+
+    - name: Ensure /etc/apt/keyrings directory exists
+      ansible.builtin.file:
+        path: /etc/apt/keyrings
+        state: directory
+        mode: '0755'
+
+    - name: Handle Docker Socket Permissions
+      ansible.builtin.file:
+        path: /run/docker.sock
+        mode: '0666'
+
+    - name: Handle containerd Socket Permissions
+      ansible.builtin.file:
+        path: /run/containerd/containerd.sock
+        mode: '0666'
+
+    - name: Configuring containerd
+      ansible.builtin.blockinfile:
+        path: /etc/containerd/config.toml
+        create: true
+        insertbefore: BOF
+        block: |
+          version = 2
+          [plugins]
+            [plugins."io.containerd.grpc.v1.cri"]
+
+    - name: Install GPG key for Kubernetes
+      ansible.builtin.shell: |
+        curl -fsSL https://pkgs.k8s.io/core:/stable:/v1.28/deb/Release.key | gpg --dearmor -o /etc/apt/keyrings/kubernetes-apt-keyring.gpg
+      args:
+        creates: /etc/apt/keyrings/kubernetes-apt-keyring.gpg  # Ensures this runs only if the key is missing
+
+    - name: Add Kubernetes APT repository
+      ansible.builtin.apt_repository:
+        repo: 'deb [signed-by=/etc/apt/keyrings/kubernetes-apt-keyring.gpg] https://pkgs.k8s.io/core:/stable:/v1.28/deb/ /'
+        state: present
+
+    - name: Installing k8s components packages
+      ansible.builtin.apt:
+        name:
+          - kubeadm=1.28.1-1.1
+          - kubelet=1.28.1-1.1
+          - kubectl=1.28.1-1.1
+        state: present
+        force: true
+        update_cache: true
+
+    - name: Disable Swap
+      ansible.builtin.command: swapoff -a
+      changed_when: false
+
+    - name: Check if br_netfilter is loaded
+      ansible.builtin.shell: lsmod | grep br_netfilter
+      register: br_netfilter_check
+      ignore_errors: true
+
+    - name: Load br_netfilter module if not loaded
+      ansible.builtin.modprobe:
+        name: br_netfilter
+      when: br_netfilter_check.rc != 0
+
+    - name: Ensure sysctl config for Kubernetes networking exists
+      ansible.builtin.lineinfile:
+        path: /etc/sysctl.d/k8s.conf
+        state: present
+        create: yes
+        line: "{{ item }}"
+      loop:
+        - 'net.bridge.bridge-nf-call-ip6tables = 1'
+        - 'net.bridge.bridge-nf-call-iptables = 1'
+
+    - name: Apply sysctl changes
+      ansible.builtin.command: sysctl --system
+      register: sysctl_output
+      changed_when: "'Reloading' in sysctl_output.stdout"
+
+    - name: Starting services
+      ansible.builtin.service:
+        name: "{{ item }}"
+        state: started
+        enabled: true
+      loop:
+        - docker
+        - containerd
+        - kubelet
+      
+    - name: Reset kubeadm
+      ansible.builtin.command: kubeadm reset --force
+
+    - name: Initialize K8s Cluster
+      tags: Initialize_cluster
+      ansible.builtin.command: kubeadm init --pod-network-cidr=10.244.0.0/16
+      register: kubeadm_output
+      when: master_nodes_group in group_names
+
+    - name: Making Kube config directory
+      tags: config_directory
+      ansible.builtin.file:
+        path: "/home/{{ username_var }}/.kube"
+        owner: "{{ username_var }}"
+        group: "{{ groupname_var }}"
+        state: directory
+      when: master_nodes_group in group_names
+
+    - name: Kube config copy
+      tags: copy_config
+      ansible.builtin.shell: sudo cp /etc/kubernetes/admin.conf /home/{{ username_var }}/.kube/config && chown {{ username_var }}:{{ groupname_var }} /home/{{ username_var }}/.kube/config
+      when: master_nodes_group in group_names
+
+    - name: Install Calico Operator
+      ansible.builtin.command: >
+        kubectl create -f https://raw.githubusercontent.com/projectcalico/calico/v3.26.5/manifests/tigera-operator.yaml --kubeconfig /home/ahmed/.kube/config
+      when: master_nodes_group in group_names
+
+    - name: Install Calico CRD
+      ansible.builtin.command: >
+        kubectl create -f https://raw.githubusercontent.com/projectcalico/calico/v3.26.5/manifests/custom-resources.yaml --kubeconfig /home/ahmed/.kube/config
+      when: master_nodes_group in group_names
+
+    - name: Install Calico 
+      ansible.builtin.command: >
+        kubectl apply -f https://raw.githubusercontent.com/projectcalico/calico/v3.26.5/manifests/custom-resources.yaml --kubeconfig /home/ahmed/.kube/config
+      when: master_nodes_group in group_names
+
+    - name: Deploy Ingress Controller (NGINX)
+      ansible.builtin.command: >
+        kubectl apply -f https://raw.githubusercontent.com/kubernetes/ingress-nginx/controller-v0.49.0/deploy/static/provider/baremetal/deploy.yaml --kubeconfig /home/ahmed/.kube/config
+      when: master_nodes_group in group_names
+
+    - name: Install Kubeaudit
+      ansible.builtin.unarchive:
+        src: https://github.com/Shopify/kubeaudit/releases/download/v0.22.2/kubeaudit_0.22.2_linux_amd64.tar.gz
+        dest: /usr/local/bin/
+        remote_src: true
+
+    - name: Get the control plane IP
+      ansible.builtin.set_fact:
+        control_plane_ip: "{{ hostvars[groups[master_nodes_group][0]].ansible_host }}"
+
+    - name: Get the kubeadm join command from master
+      ansible.builtin.command: kubeadm token create --print-join-command
+      register: join_command
+      changed_when: false
+      delegate_to: "{{ groups[master_nodes_group][0] }}"
+      run_once: true
+
+    - name: Set fact for the join command
+      ansible.builtin.set_fact:
+        worker_join_command: "{{ join_command.stdout }}"
+      when: join_command is defined
+
+    - name: Join the Kubernetes cluster
+      ansible.builtin.command: "{{ worker_join_command }} --apiserver-advertise-address={{ hostvars[groups[master_nodes_group][0]].ansible_host }}"
+      when: worker_nodes_group in group_names

@@ -1,0 +1,6 @@
+[kubernetes_master_nodes]
+masternode ansible_host=54.237.23.50 ansible_user=ubuntu ansible_ssh_private_key_file=master_ssh_key.pem
+
+[kubernetes_worker_nodes]
+workernode01 ansible_host=3.87.170.170 ansible_user=ubuntu ansible_ssh_private_key_file=master_ssh_key.pem
+workernode02 ansible_host=54.210.72.157 ansible_user=ubuntu ansible_ssh_private_key_file=master_ssh_key.pem

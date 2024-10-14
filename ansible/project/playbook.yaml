@@ -1,0 +1,70 @@
+---
+- name: Setup Kubernetes Cluster
+  hosts: all
+  become: true
+  roles:
+    - { role: common }
+
+- name: Setup Master Node
+  hosts: kubernetes_master_nodes
+  become: true
+  vars:
+    username_var: ahmed
+    groupname_var: ahmed
+  roles:
+    - { role: master }
+  tasks:
+    - name: Generate kubeadm join command
+      ansible.builtin.shell: kubeadm token create --print-join-command
+      register: join_command
+
+    - name: Share join command with worker nodes
+      ansible.builtin.set_fact:
+        worker_join_command: "{{ join_command.stdout }}"
+      delegate_to: localhost
+
+    - name: Display Join Command for Debugging
+      debug:
+        msg: "Join Command: {{ join_command.stdout }}"
+
+- name: Setup Worker Nodes
+  hosts: kubernetes_worker_nodes
+  become: true
+  tasks:
+    - name: Join Worker Node to Kubernetes Cluster
+      ansible.builtin.command: "{{ hostvars[groups['kubernetes_master_nodes'][0]]['worker_join_command'] }}"
+      register: join_result
+
+    - name: Debug Join Result
+      ansible.builtin.debug:
+        msg: "{{ join_result.stdout }}"
+
+- name: Post Cluster Setup
+  hosts: kubernetes_master_nodes
+  become: yes
+  tasks:
+    - name: Install Calico 
+      ansible.builtin.shell: |
+        export KUBECONFIG=/home/ahmed/.kube/config
+        kubectl apply -f https://raw.githubusercontent.com/projectcalico/calico/v3.25.0/manifests/calico.yaml
+
+    - name: Deploy Ingress Controller (NGINX)
+      ansible.builtin.command: >
+        kubectl apply -f https://raw.githubusercontent.com/kubernetes/ingress-nginx/controller-v0.49.0/deploy/static/provider/baremetal/deploy.yaml --kubeconfig /home/ahmed/.kube/config
+
+    - name: Install Kubeaudit
+      ansible.builtin.unarchive:
+        src: https://github.com/Shopify/kubeaudit/releases/download/v0.22.2/kubeaudit_0.22.2_linux_amd64.tar.gz
+        dest: /usr/local/bin/
+        remote_src: true
+
+    - name: Scanning with Kubeaudit
+      ansible.builtin.command: kubeaudit all
+      environment:
+        KUBECONFIG: /home/ahmed/.kube/config
+      register: kubeaudit_output
+      ignore_errors: true
+
+    - name: Kubeaudit Result
+      ansible.builtin.debug:
+        msg: "{{ kubeaudit_output.stdout }}"

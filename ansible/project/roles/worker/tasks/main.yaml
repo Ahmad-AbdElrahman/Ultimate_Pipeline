@@ -1,0 +1,8 @@
+---
+- name: Join Worker Node to Kubernetes Cluster
+  ansible.builtin.command: "{{ hostvars['master_node_hostname']['worker_join_command'] }}"
+  register: join_result
+
+- name: Debug Join Result
+  ansible.builtin.debug:
+    msg: "{{ join_result.stdout }}"

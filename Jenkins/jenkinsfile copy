@@ -10,8 +10,11 @@ pipeline {
     stages {
         stage('Git Checkout') {
             steps {
-                git branch: 'main', credentialsId: 'git-cred', url:
-                'https://github.com/ganeshperumal007/Boardgame.git'
+                checkout scmGit(
+                    branches: [[name: 'main']],
+                    userRemoteConfigs: [[credentialsId: 'git-cred',
+                    url: 'https://github.com/ganeshperumal007/Boardgame.git']]
+                )
             }
         }
 
@@ -43,10 +46,10 @@ pipeline {
             }
         }
 
-        stage('Quality Gate') {
+        stage("Quality Gate") {
             steps {
-                script {
-                    waitForQualityGate ab(globaortPipeline: false, credentialsId: 'sonar-token'
+                timeout(time: 1, unit: 'HOURS') {
+                    waitForQualityGate abortPipeline: false,  credentialsId: 'sonar-token'
                 }
             }
         }
